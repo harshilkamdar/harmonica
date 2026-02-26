@@ -9,9 +9,9 @@ uv sync
 uv run python -m unittest -q tests/test_wms_1f3f.py
 ```
 
-For running the different experiments: 
+For running the different experiments:
 ```
-uv run python scripts/run_odd_experiments.py
+uv run python scripts/run_odd_experiments.py                                                  # 1f+3f and 1f+3f+5f+7f+9f
 uv run python scripts/run_phase_experiment.py --terms 6
 uv run python scripts/run_phase_experiment.py --terms 9 --maxiter 400 --popsize 30 --seed 42
 ```
