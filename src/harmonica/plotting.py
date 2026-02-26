@@ -6,6 +6,7 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 import matplotlib.pyplot as plt
 import numpy as np
 
+from .optimize import ALLOWED_ODD_HARMONICS
 from .wms import C_LIGHT_M_PER_S, DEFAULT_CENTER_HZ, DEFAULT_HWHM_HZ, get_hitran_profile
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -13,17 +14,19 @@ OUTPUT_DIR = PROJECT_ROOT / "outputs"
 PLOTS_DIR = OUTPUT_DIR / "plots"
 ANIMATIONS_DIR = OUTPUT_DIR / "animations"
 
-ALLOWED_ODD_HARMONICS = (1, 3, 5, 7, 9)
+
+def _eval_harmonics(theta, amplitudes, phases):
+    """Evaluate sum of harmonic sines: sum_h m_h sin(h*theta + phi_h)."""
+    m = np.zeros_like(theta)
+    for h, a in amplitudes.items():
+        m += a * np.sin(h * theta + phases.get(h, 0.0))
+    return m
 
 
-def _detuning_profile_norm(harmonics, amplitudes, phases_rad, n_points=2000):
-    """Compute normalized detuning waveform over one period of theta."""
+def _x_norm(result, n_points=2000):
+    """Compute normalized modulation waveform x/HWHM over one period."""
     theta = np.linspace(0.0, 2.0 * np.pi, n_points, endpoint=False)
-    m_theta = np.zeros_like(theta)
-    for h in harmonics:
-        phi = 0.0 if h == 1 else phases_rad.get(h, 0.0)
-        m_theta = m_theta + amplitudes[h] * np.sin(h * theta + phi)
-    return theta, m_theta
+    return theta, _eval_harmonics(theta, result.amplitudes, result.phases_rad)
 
 
 def _bang_bang_dwell_profile(max_abs_m, n_points=2000):
@@ -35,7 +38,7 @@ def _bang_bang_dwell_profile(max_abs_m, n_points=2000):
 
 def plot_vs_bang_bang(result, output_path=PLOTS_DIR / "waveform_vs_bang_bang.png", n_points=2000):
     """Plot optimized waveform against the bang-bang dwell target."""
-    theta, m_opt = _detuning_profile_norm(result.harmonics, result.amplitudes, result.phases_rad, n_points=n_points)
+    theta, m_opt = _x_norm(result, n_points=n_points)
     _, m_bang = _bang_bang_dwell_profile(float(np.max(np.abs(m_opt))), n_points=n_points)
 
     out = Path(output_path)
@@ -44,7 +47,7 @@ def plot_vs_bang_bang(result, output_path=PLOTS_DIR / "waveform_vs_bang_bang.png
     plt.plot(theta / np.pi, m_opt, label="Optimized odd-harmonic waveform", lw=2.0)
     plt.plot(theta / np.pi, m_bang, label="Theoretical bang-bang dwell target", lw=2.0, alpha=0.9)
     plt.xlabel(r"Phase $\theta / \pi$")
-    plt.ylabel("Detuning / HWHM")
+    plt.ylabel("x / HWHM")
     plt.title("Optimized Waveform vs Bang-Bang Dwell Target")
     plt.xlim(0.0, 2.0)
     plt.grid(alpha=0.25)
@@ -62,18 +65,11 @@ def plot_waveform_periods_and_amplitudes(
 ):
     """Plot waveform over multiple periods with harmonic amplitude bar chart."""
     theta = np.linspace(0.0, 2.0 * np.pi * n_periods, n_periods * points_per_period, endpoint=False)
-
-    m_theta = np.zeros_like(theta)
-    for h in result.harmonics:
-        phi = 0.0 if h == 1 else result.phases_rad.get(h, 0.0)
-        m_theta = m_theta + result.amplitudes[h] * np.sin(h * theta + phi)
+    m_theta = _eval_harmonics(theta, result.amplitudes, result.phases_rad)
 
     m_theta_cmp = None
     if compare_result is not None:
-        m_theta_cmp = np.zeros_like(theta)
-        for h in compare_result.harmonics:
-            phi = 0.0 if h == 1 else compare_result.phases_rad.get(h, 0.0)
-            m_theta_cmp = m_theta_cmp + compare_result.amplitudes[h] * np.sin(h * theta + phi)
+        m_theta_cmp = _eval_harmonics(theta, compare_result.amplitudes, compare_result.phases_rad)
 
     harms = list(ALLOWED_ODD_HARMONICS)
     amps = [result.amplitudes.get(h, 0.0) for h in harms]
@@ -87,7 +83,7 @@ def plot_waveform_periods_and_amplitudes(
         axes[0].plot(theta / (2.0 * np.pi), m_theta_cmp, lw=2.0, label=f"Optimized {compare_result.harmonics}")
     axes[0].set_xlim(0.0, float(n_periods))
     axes[0].set_xlabel("Time [periods]")
-    axes[0].set_ylabel("Detuning / HWHM")
+    axes[0].set_ylabel("x / HWHM")
     axes[0].set_title(f"Optimized Waveform Over {n_periods} Periods")
     axes[0].grid(alpha=0.25)
     if m_theta_cmp is not None:
@@ -122,13 +118,9 @@ def plot_waveform_periods_nm(
 ):
     """Plot waveform in wavelength (nm) over multiple periods."""
     theta = np.linspace(0.0, 2.0 * np.pi * n_periods, n_periods * points_per_period, endpoint=False)
-    m_theta = np.zeros_like(theta)
-    for h in result.harmonics:
-        phi = 0.0 if h == 1 else result.phases_rad.get(h, 0.0)
-        m_theta = m_theta + result.amplitudes[h] * np.sin(h * theta + phi)
+    m_theta = _eval_harmonics(theta, result.amplitudes, result.phases_rad)
 
-    det_hz = m_theta * hwhm_hz
-    f_hz = center_hz + det_hz
+    f_hz = center_hz + m_theta * hwhm_hz
     lam_nm = (C_LIGHT_M_PER_S / f_hz) * 1e9
 
     out = Path(output_path)
@@ -157,13 +149,9 @@ def animate_scan_on_line(
     n_frames = max(2, int(n_periods * frames_per_period))
 
     theta = np.linspace(0.0, 2.0 * np.pi * n_periods, n_frames, endpoint=False)
-    m_theta = np.zeros_like(theta)
-    for h in result.harmonics:
-        phi = 0.0 if h == 1 else result.phases_rad.get(h, 0.0)
-        m_theta = m_theta + result.amplitudes[h] * np.sin(h * theta + phi)
+    m_theta = _eval_harmonics(theta, result.amplitudes, result.phases_rad)
 
-    det_hz = m_theta * hwhm_hz
-    f_hz = center_hz + det_hz
+    f_hz = center_hz + m_theta * hwhm_hz
     lam_nm = (C_LIGHT_M_PER_S / f_hz) * 1e9
     y_scan = np.interp(lam_nm, x_nm, y_norm, left=0.0, right=0.0)
 
@@ -181,7 +169,7 @@ def animate_scan_on_line(
     ax0.set_ylim(-0.02, 1.05)
     ax0.set_xlabel("Wavelength [nm]")
     ax0.set_ylabel("Normalized Line Strength")
-    ax0.set_title("Scan Position on HITRAN Methane Line")
+    ax0.set_title("Scan Position on HITRAN Line")
     ax0.grid(alpha=0.25)
 
     ax1.plot(t_periods, lam_nm, color="C1", lw=2.0)

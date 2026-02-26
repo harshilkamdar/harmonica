@@ -2,15 +2,13 @@
 """Run phase-distorted sine optimization."""
 
 import argparse
-import json
-from datetime import datetime, timezone
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from harmonica.optimize_phase import optimize_phase_distorted_amp2
+from harmonica.optimize_phase import optimize_phase_distorted_amp2, save_result_json
 
 
 def main():
@@ -29,21 +27,7 @@ def main():
     )
 
     out_path = ROOT / "outputs" / "results" / f"result_phase_k{args.terms}.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "saved_at_utc": datetime.now(timezone.utc).isoformat(),
-        "n_phase_terms": args.terms,
-        "m_max": res.m_max,
-        "p_terms": list(res.p_terms),
-        "amp2": res.amp2,
-        "snr2": res.snr2,
-        "amp2_sine_baseline": res.amp2_sine_baseline,
-        "gain_vs_sine": res.gain_vs_sine,
-        "success": res.success,
-        "message": res.message,
-        "nfev": res.nfev,
-    }
-    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    save_result_json(res, out_path)
 
     print("success:", res.success)
     print("message:", res.message)

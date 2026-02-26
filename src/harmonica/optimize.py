@@ -50,49 +50,22 @@ def _vector_layout(harmonics):
     return layout
 
 
-def _decode_params(x, layout, harmonics):
+def _decode_params(x, layout):
     """Unpack optimization vector into (amplitudes, phases) dicts."""
-    amplitudes = {h: 0.0 for h in ALLOWED_ODD_HARMONICS}
-    phases = {h: 0.0 for h in ALLOWED_ODD_HARMONICS}
+    amplitudes = {}
+    phases = {}
     for value, (harm, kind) in zip(x, layout, strict=True):
         if kind == "amp":
             amplitudes[harm] = float(value)
         else:
             phases[harm] = float(value)
-    phases[1] = 0.0
-    for h in harmonics:
-        amplitudes.setdefault(h, 0.0)
-        phases.setdefault(h, 0.0)
     return amplitudes, phases
 
 
-def _sim_kwargs_from_params(amplitudes, phases):
-    """Convert amplitudes/phases dicts to simulate_wms keyword arguments."""
-    return {
-        "m1": amplitudes.get(1, 0.0),
-        "m3": amplitudes.get(3, 0.0),
-        "phi3_rad": phases.get(3, 0.0),
-        "m5": amplitudes.get(5, 0.0),
-        "phi5_rad": phases.get(5, 0.0),
-        "m7": amplitudes.get(7, 0.0),
-        "phi7_rad": phases.get(7, 0.0),
-        "m9": amplitudes.get(9, 0.0),
-        "phi9_rad": phases.get(9, 0.0),
-    }
-
-
-def _amp2_and_snr2(
-    amplitudes, phases, *,
-    fm_hz=20_000.0, fs_hz=2_000_000.0, n_periods=1,
-    peak_abs=0.5, hwhm_hz=DEFAULT_HWHM_HZ, noise_std_time=1e-3,
-):
+def _amp2_and_snr2(amplitudes, phases, **sim_kwargs):
     """Evaluate 2f amplitude and SNR for given harmonic parameters."""
-    sim_kwargs = _sim_kwargs_from_params(amplitudes, phases)
     (amp2,), (snr2,), *_ = simulate_wms(
-        fm_hz=fm_hz, fs_hz=fs_hz, n_periods=n_periods,
-        waveform="1f3f5f7f9f", peak_abs=peak_abs, hwhm_hz=hwhm_hz,
-        noise_std_time=noise_std_time, harmonics=(2,),
-        **sim_kwargs,
+        amplitudes=amplitudes, phases=phases, harmonics=(2,), **sim_kwargs,
     )
     return float(amp2), float(snr2)
 
@@ -112,6 +85,11 @@ def optimize_harmonics_amp2(
     harmonics = _validate_harmonics(harmonics)
     layout = _vector_layout(harmonics)
 
+    sim_kwargs = dict(
+        fm_hz=fm_hz, fs_hz=fs_hz, n_periods=n_periods,
+        peak_abs=peak_abs, hwhm_hz=hwhm_hz, noise_std_time=noise_std_time,
+    )
+
     bounds = []
     x0 = []
     for harm, kind in layout:
@@ -129,12 +107,8 @@ def optimize_harmonics_amp2(
                 x0.append(0.0)
 
     def objective(x):
-        amplitudes, phases = _decode_params(x, layout, harmonics)
-        amp2, _ = _amp2_and_snr2(
-            amplitudes, phases,
-            fm_hz=fm_hz, fs_hz=fs_hz, n_periods=n_periods,
-            peak_abs=peak_abs, hwhm_hz=hwhm_hz, noise_std_time=noise_std_time,
-        )
+        amplitudes, phases = _decode_params(x, layout)
+        amp2, _ = _amp2_and_snr2(amplitudes, phases, **sim_kwargs)
         return -amp2
 
     if method == "differential_evolution":
@@ -150,25 +124,18 @@ def optimize_harmonics_amp2(
             options={"maxiter": 300, "xtol": 1e-4, "ftol": 1e-8},
         )
 
-    amplitudes, phases = _decode_params(np.asarray(result.x, dtype=float), layout, harmonics)
-    amp2_opt, snr2_opt = _amp2_and_snr2(
-        amplitudes, phases,
-        fm_hz=fm_hz, fs_hz=fs_hz, n_periods=n_periods,
-        peak_abs=peak_abs, hwhm_hz=hwhm_hz, noise_std_time=noise_std_time,
-    )
+    amplitudes, phases = _decode_params(np.asarray(result.x, dtype=float), layout)
+    amp2_opt, snr2_opt = _amp2_and_snr2(amplitudes, phases, **sim_kwargs)
 
     (amp2_sine,), *_ = simulate_wms(
-        fm_hz=fm_hz, fs_hz=fs_hz, n_periods=n_periods,
-        waveform="sine", m1=sine_m1_baseline,
-        peak_abs=peak_abs, hwhm_hz=hwhm_hz,
-        noise_std_time=noise_std_time, harmonics=(2,),
+        amplitudes={1: sine_m1_baseline}, harmonics=(2,), **sim_kwargs,
     )
     amp2_sine = float(amp2_sine)
 
     return OptimizationResult(
         harmonics=harmonics,
-        amplitudes={h: amplitudes[h] for h in harmonics},
-        phases_rad={h: phases[h] for h in harmonics if h != 1},
+        amplitudes=amplitudes,
+        phases_rad=phases,
         amp2=amp2_opt,
         snr2=snr2_opt,
         amp2_sine_baseline=amp2_sine,

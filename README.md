@@ -1,17 +1,17 @@
 ## Harmonica
 
-Repository layout:
+Optimizes modulation waveforms for wavelength modulation spectroscopy (WMS). Uses differential evolution to find odd-harmonic (1f+3f, up to 9f) and phase-distorted sine waveforms that maximize the 2f lock-in signal against arbitrary line profile.
 
-- `src/harmonica/`: core simulation + optimization modules
-- `scripts/`: runnable experiment entrypoints
-- `data/`: static input data (`hitran.npz`)
-- `outputs/plots/`: generated plot images
-- `outputs/results/`: saved optimization result JSONs
-- `outputs/animations/`: generated GIFs
+Once you install uv, cd into the directory and run:
 
-Run experiments:
+```
+uv sync
+uv run python -m unittest -q tests/test_wms_1f3f.py
+```
 
-- Odd-harmonic experiments (1f+3f and 1f+3f+5f+7f+9f):
-  - `python scripts/run_odd_experiments.py`
-- Phase-distorted sine (Option 5B):
-  - `python scripts/run_phase_experiment.py --terms 6 --maxiter 260 --popsize 22 --seed 0`
+For running the different experiments: 
+```
+uv run python scripts/run_odd_experiments.py
+uv run python scripts/run_phase_experiment.py --terms 6
+uv run python scripts/run_phase_experiment.py --terms 9 --maxiter 400 --popsize 30 --seed 42
+```

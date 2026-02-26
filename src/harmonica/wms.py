@@ -8,7 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load_hitran_line():
-    """Load methane line profile from data/hitran.npz."""
+    """Load absorption line profile from data/hitran.npz."""
     data_path = PROJECT_ROOT / "data" / "hitran.npz"
     if not data_path.exists():
         data_path = Path(__file__).with_name("hitran.npz")
@@ -89,49 +89,24 @@ def make_timebase(fm_hz, fs_hz, n_periods=1):
     return t_s, dt_s, n_per_period
 
 
-def detuning_hz_sine(t_s, fm_hz, m1, hwhm_hz):
-    """Detuning for pure sine: dv(t) = m1 * HWHM * sin(2*pi*fm*t)."""
+def x_hz(t_s, fm_hz, amplitudes, phases, hwhm_hz):
+    """Modulation waveform x(t) in Hz: x = HWHM * sum_h m_h sin(h*theta + phi_h)."""
     theta = PI2 * fm_hz * t_s
-    return (m1 * hwhm_hz) * jnp.sin(theta)
+    m = jnp.zeros_like(theta)
+    for h, a in amplitudes.items():
+        m = m + a * jnp.sin(h * theta + phases.get(h, 0.0))
+    return hwhm_hz * m
 
 
-def detuning_hz_1f3f(t_s, fm_hz, m1, m3, phi3_rad, hwhm_hz):
-    """Detuning with 1st and 3rd harmonics."""
-    theta = PI2 * fm_hz * t_s
-    return hwhm_hz * (m1 * jnp.sin(theta) + m3 * jnp.sin(3.0 * theta + phi3_rad))
-
-
-def detuning_hz_1f3f5f(t_s, fm_hz, m1, m3, phi3_rad, m5, phi5_rad, hwhm_hz):
-    """Detuning with 1st, 3rd, and 5th harmonics."""
-    theta = PI2 * fm_hz * t_s
-    return hwhm_hz * (
-        m1 * jnp.sin(theta)
-        + m3 * jnp.sin(3.0 * theta + phi3_rad)
-        + m5 * jnp.sin(5.0 * theta + phi5_rad)
-    )
-
-
-def detuning_hz_1f3f5f7f9f(t_s, fm_hz, m1, m3, phi3_rad, m5, phi5_rad, m7, phi7_rad, m9, phi9_rad, hwhm_hz):
-    """Detuning with odd harmonics through 9f."""
-    theta = PI2 * fm_hz * t_s
-    return hwhm_hz * (
-        m1 * jnp.sin(theta)
-        + m3 * jnp.sin(3.0 * theta + phi3_rad)
-        + m5 * jnp.sin(5.0 * theta + phi5_rad)
-        + m7 * jnp.sin(7.0 * theta + phi7_rad)
-        + m9 * jnp.sin(9.0 * theta + phi9_rad)
-    )
-
-
-def transmission_placeholder(detuning_hz, peak_abs, hwhm_hz):
-    """Methane transmission from HITRAN profile, scaled to peak_abs at line center."""
-    det_np = np.asarray(detuning_hz, dtype=np.float64)
-    f_hz = _HITRAN_CENTER_HZ + det_np
+def transmission(x_hz_arr, peak_abs):
+    """Transmission from HITRAN profile, scaled to peak_abs at line center."""
+    x_np = np.asarray(x_hz_arr, dtype=np.float64)
+    f_hz = _HITRAN_CENTER_HZ + x_np
     lam_nm = (C_LIGHT_M_PER_S / f_hz) * 1e9
     profile = np.interp(lam_nm, _HITRAN_X_NM, _HITRAN_Y_NORM, left=0.0, right=0.0)
     absorbance = peak_abs * profile
-    transmission = np.exp(-absorbance)
-    return jnp.asarray(transmission, dtype=detuning_hz.dtype)
+    trans = np.exp(-absorbance)
+    return jnp.asarray(trans, dtype=x_hz_arr.dtype)
 
 
 def get_hitran_profile():
@@ -155,74 +130,47 @@ def lockin_amps(signal, t_s, f_ref_hz, harmonics=(1, 2, 3)):
 
 
 def simulate_wms(
-    fm_hz=20_000.0,
-    fs_hz=2_000_000.0,
-    n_periods=1,
-    waveform="sine",
-    m1=2.25,
-    m3=0.0,
-    phi3_rad=0.0,
-    m5=0.0,
-    phi5_rad=0.0,
-    m7=0.0,
-    phi7_rad=0.0,
-    m9=0.0,
-    phi9_rad=0.0,
-    peak_abs=0.5,
-    hwhm_hz=DEFAULT_HWHM_HZ,
-    noise_std_time=1e-3,
-    harmonics=(2,),
+    fm_hz=20_000.0, fs_hz=2_000_000.0, n_periods=1,
+    amplitudes=None, phases=None,
+    peak_abs=0.5, hwhm_hz=DEFAULT_HWHM_HZ,
+    noise_std_time=1e-3, harmonics=(2,),
     return_trace=False,
 ):
-    """Run a WMS toy simulation and return (amplitudes, SNRs, slew_rms, slew_max, dt_s, n_per_period)."""
+    """Run a WMS toy simulation and return (amps, SNRs, slew_rms, slew_max, dt_s, n_per_period)."""
+    if amplitudes is None:
+        amplitudes = {1: 2.25}
+    if phases is None:
+        phases = {}
     if hwhm_hz <= 0.0:
         raise ValueError("hwhm_hz must be > 0.")
     if noise_std_time < 0.0:
         raise ValueError("noise_std_time must be >= 0.")
 
     t_s, dt_s, n_per_period = make_timebase(fm_hz, fs_hz, n_periods=n_periods)
+    x = x_hz(t_s, fm_hz, amplitudes, phases, hwhm_hz)
+    trans = transmission(x, peak_abs=peak_abs)
+    amps_all = lockin_amps(trans, t_s, f_ref_hz=fm_hz, harmonics=harmonics)
 
-    if waveform == "sine":
-        det_hz = detuning_hz_sine(t_s, fm_hz=fm_hz, m1=m1, hwhm_hz=hwhm_hz)
-    elif waveform == "1f3f":
-        det_hz = detuning_hz_1f3f(t_s, fm_hz=fm_hz, m1=m1, m3=m3, phi3_rad=phi3_rad, hwhm_hz=hwhm_hz)
-    elif waveform == "1f3f5f":
-        det_hz = detuning_hz_1f3f5f(
-            t_s, fm_hz=fm_hz, m1=m1, m3=m3, phi3_rad=phi3_rad,
-            m5=m5, phi5_rad=phi5_rad, hwhm_hz=hwhm_hz,
-        )
-    elif waveform == "1f3f5f7f9f":
-        det_hz = detuning_hz_1f3f5f7f9f(
-            t_s, fm_hz=fm_hz, m1=m1, m3=m3, phi3_rad=phi3_rad,
-            m5=m5, phi5_rad=phi5_rad, m7=m7, phi7_rad=phi7_rad,
-            m9=m9, phi9_rad=phi9_rad, hwhm_hz=hwhm_hz,
-        )
-    else:
-        raise ValueError(f"Unknown waveform='{waveform}'.")
-
-    transmission = transmission_placeholder(det_hz, peak_abs=peak_abs, hwhm_hz=hwhm_hz)
-    amps_all = lockin_amps(transmission, t_s, f_ref_hz=fm_hz, harmonics=harmonics)
-
-    ddt = jnp.diff(det_hz) / dt_s
-    slew_rms = jnp.sqrt(jnp.mean(ddt * ddt))
-    slew_max = jnp.max(jnp.abs(ddt))
+    dx = jnp.diff(x) / dt_s
+    slew_rms = jnp.sqrt(jnp.mean(dx * dx))
+    slew_max = jnp.max(jnp.abs(dx))
 
     N = t_s.size
     sigma_amp = 2.0 * noise_std_time / jnp.sqrt(N)
     snrs = amps_all / sigma_amp
 
     if return_trace:
-        return amps_all, snrs, slew_rms, slew_max, dt_s, n_per_period, det_hz, transmission
+        return amps_all, snrs, slew_rms, slew_max, dt_s, n_per_period, x, trans
     return amps_all, snrs, slew_rms, slew_max, dt_s, n_per_period
 
 
 if __name__ == "__main__":
     (amp2_sin,), (snr2_sin,), rms_sin, max_sin, dt_s, npp = simulate_wms(
-        waveform="sine", m1=2.25, harmonics=(2,)
+        amplitudes={1: 2.25}, harmonics=(2,)
     )
 
     (amp2_13,), (snr2_13,), rms_13, max_13, *_ = simulate_wms(
-        waveform="1f3f", m1=4.375, m3=1.88125, phi3_rad=jnp.pi, harmonics=(2,)
+        amplitudes={1: 4.375, 3: 1.88125}, phases={3: jnp.pi}, harmonics=(2,)
     )
 
     fs_hz = 1.0 / float(dt_s)

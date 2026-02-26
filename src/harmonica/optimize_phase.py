@@ -1,11 +1,17 @@
 """Phase-distorted sine optimization for WMS-2f."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+from pathlib import Path
 
 import numpy as np
 from scipy.optimize import differential_evolution
 
-from .wms import DEFAULT_HWHM_HZ, lockin_amps, make_timebase, simulate_wms, transmission_placeholder
+from .wms import DEFAULT_HWHM_HZ, lockin_amps, make_timebase, simulate_wms, transmission
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RESULTS_DIR = PROJECT_ROOT / "outputs" / "results"
 
 
 @dataclass
@@ -22,7 +28,7 @@ class PhaseDistortedResult:
 
 
 def phase_distorted_m(theta, m_max, p_terms):
-    """Normalized detuning: m(theta) = m_max * sin(theta + sum_k p_k * sin(k*theta))."""
+    """Normalized modulation: m(theta) = m_max * sin(theta + sum_k p_k * sin(k*theta))."""
     phase_warp = np.zeros_like(theta)
     for k, pk in enumerate(p_terms, start=1):
         phase_warp += pk * np.sin(k * theta)
@@ -39,10 +45,10 @@ def _amp2_and_snr2_phase(
     theta = 2.0 * np.pi * fm_hz * np.asarray(t_s, dtype=np.float64)
 
     m_theta = phase_distorted_m(theta, m_max, p_terms)
-    det_hz = hwhm_hz * m_theta
-    transmission = transmission_placeholder(det_hz, peak_abs=peak_abs, hwhm_hz=hwhm_hz)
+    x = hwhm_hz * m_theta
+    trans = transmission(x, peak_abs=peak_abs)
 
-    (amp2,) = lockin_amps(transmission, t_s, f_ref_hz=fm_hz, harmonics=(2,))
+    (amp2,) = lockin_amps(trans, t_s, f_ref_hz=fm_hz, harmonics=(2,))
     amp2 = float(amp2)
 
     sigma_amp = 2.0 * noise_std_time / np.sqrt(t_s.size)
@@ -62,16 +68,17 @@ def optimize_phase_distorted_amp2(
     if n_phase_terms < 1:
         raise ValueError("n_phase_terms must be >= 1.")
 
+    sim_kwargs = dict(
+        fm_hz=fm_hz, fs_hz=fs_hz, n_periods=n_periods,
+        peak_abs=peak_abs, hwhm_hz=hwhm_hz, noise_std_time=noise_std_time,
+    )
+
     bounds = [m_max_bounds] + [p_bounds] * n_phase_terms
 
     def objective(x):
         m_max = float(x[0])
         p = tuple(float(v) for v in x[1:])
-        amp2, _ = _amp2_and_snr2_phase(
-            m_max, p,
-            fm_hz=fm_hz, fs_hz=fs_hz, n_periods=n_periods,
-            peak_abs=peak_abs, hwhm_hz=hwhm_hz, noise_std_time=noise_std_time,
-        )
+        amp2, _ = _amp2_and_snr2_phase(m_max, p, **sim_kwargs)
         return -amp2
 
     result = differential_evolution(
@@ -82,17 +89,10 @@ def optimize_phase_distorted_amp2(
 
     m_max_opt = float(result.x[0])
     p_opt = tuple(float(v) for v in result.x[1:])
-    amp2_opt, snr2_opt = _amp2_and_snr2_phase(
-        m_max_opt, p_opt,
-        fm_hz=fm_hz, fs_hz=fs_hz, n_periods=n_periods,
-        peak_abs=peak_abs, hwhm_hz=hwhm_hz, noise_std_time=noise_std_time,
-    )
+    amp2_opt, snr2_opt = _amp2_and_snr2_phase(m_max_opt, p_opt, **sim_kwargs)
 
     (amp2_sine,), *_ = simulate_wms(
-        fm_hz=fm_hz, fs_hz=fs_hz, n_periods=n_periods,
-        waveform="sine", m1=sine_m1_baseline,
-        peak_abs=peak_abs, hwhm_hz=hwhm_hz,
-        noise_std_time=noise_std_time, harmonics=(2,),
+        amplitudes={1: sine_m1_baseline}, harmonics=(2,), **sim_kwargs,
     )
     amp2_sine = float(amp2_sine)
 
@@ -109,10 +109,26 @@ def optimize_phase_distorted_amp2(
     )
 
 
-def _equation_text(m_max, p_terms):
-    """Format the phase distortion equation as a readable string."""
-    warp = " + ".join(f"{pk:.6f}*sin({k}*theta)" for k, pk in enumerate(p_terms, start=1))
-    return f"m(theta) = {m_max:.6f} * sin(theta + {warp})"
+def save_result_json(result, output_path, *, n_phase_terms=None):
+    """Serialize a PhaseDistortedResult to JSON."""
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "saved_at_utc": datetime.now(timezone.utc).isoformat(),
+        "n_phase_terms": n_phase_terms or len(result.p_terms),
+        "m_max": result.m_max,
+        "p_terms": list(result.p_terms),
+        "amp2": result.amp2,
+        "snr2": result.snr2,
+        "amp2_sine_baseline": result.amp2_sine_baseline,
+        "gain_vs_sine": result.gain_vs_sine,
+        "success": result.success,
+        "message": result.message,
+        "nfev": result.nfev,
+    }
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return out
 
 
 if __name__ == "__main__":
@@ -126,4 +142,3 @@ if __name__ == "__main__":
     print("2f SNR:", best.snr2)
     print("2f amp (sine baseline):", best.amp2_sine_baseline)
     print("gain_vs_sine:", best.gain_vs_sine)
-    print(_equation_text(best.m_max, best.p_terms))
