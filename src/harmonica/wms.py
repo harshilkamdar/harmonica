@@ -98,12 +98,35 @@ def x_hz(t_s, fm_hz, amplitudes, phases, hwhm_hz):
     return hwhm_hz * m
 
 
-def transmission(x_hz_arr, peak_abs):
-    """Transmission from HITRAN profile, scaled to peak_abs at line center."""
+def load_profile(path):
+    """Load a line profile .npz and return (x_nm, y_norm, center_nm, center_hz, hwhm_hz)."""
+    data = np.load(path)
+    x = np.asarray(data["x"], dtype=np.float64)
+    y = np.asarray(data["y"], dtype=np.float64)
+    if x[0] > x[-1]:
+        x, y = x[::-1], y[::-1]
+    i_peak = int(np.argmax(y))
+    y_norm = y / float(y[i_peak])
+    center_nm = float(x[i_peak])
+    center_hz = C_LIGHT_M_PER_S / (center_nm * 1e-9)
+    hwhm_hz = _estimate_hwhm_hz_from_profile(x, y_norm, i_peak)
+    return x, y_norm, center_nm, center_hz, float(hwhm_hz)
+
+
+def transmission(x_hz_arr, peak_abs, line_profile=None):
+    """Transmission from line profile, scaled to peak_abs at line center.
+
+    line_profile: optional (x_nm, y_norm, center_hz) tuple. Defaults to HITRAN.
+    """
+    if line_profile is not None:
+        prof_x_nm, prof_y_norm, prof_center_hz = line_profile
+    else:
+        prof_x_nm, prof_y_norm, prof_center_hz = _HITRAN_X_NM, _HITRAN_Y_NORM, _HITRAN_CENTER_HZ
+
     x_np = np.asarray(x_hz_arr, dtype=np.float64)
-    f_hz = _HITRAN_CENTER_HZ + x_np
+    f_hz = prof_center_hz + x_np
     lam_nm = (C_LIGHT_M_PER_S / f_hz) * 1e9
-    profile = np.interp(lam_nm, _HITRAN_X_NM, _HITRAN_Y_NORM, left=0.0, right=0.0)
+    profile = np.interp(lam_nm, prof_x_nm, prof_y_norm, left=0.0, right=0.0)
     absorbance = peak_abs * profile
     trans = np.exp(-absorbance)
     return jnp.asarray(trans, dtype=x_hz_arr.dtype)
@@ -134,7 +157,7 @@ def simulate_wms(
     amplitudes=None, phases=None,
     peak_abs=0.5, hwhm_hz=DEFAULT_HWHM_HZ,
     noise_std_time=1e-3, harmonics=(2,),
-    return_trace=False,
+    return_trace=False, line_profile=None,
 ):
     """Run a WMS toy simulation and return (amps, SNRs, slew_rms, slew_max, dt_s, n_per_period)."""
     if amplitudes is None:
@@ -148,7 +171,7 @@ def simulate_wms(
 
     t_s, dt_s, n_per_period = make_timebase(fm_hz, fs_hz, n_periods=n_periods)
     x = x_hz(t_s, fm_hz, amplitudes, phases, hwhm_hz)
-    trans = transmission(x, peak_abs=peak_abs)
+    trans = transmission(x, peak_abs=peak_abs, line_profile=line_profile)
     amps_all = lockin_amps(trans, t_s, f_ref_hz=fm_hz, harmonics=harmonics)
 
     dx = jnp.diff(x) / dt_s

@@ -6,8 +6,11 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .optimize import ALLOWED_ODD_HARMONICS
-from .wms import C_LIGHT_M_PER_S, DEFAULT_CENTER_HZ, DEFAULT_HWHM_HZ, get_hitran_profile
+from .waveforms import ALLOWED_ODD_HARMONICS
+from .wms import (
+    C_LIGHT_M_PER_S, DEFAULT_CENTER_HZ, DEFAULT_HWHM_HZ,
+    get_hitran_profile, lockin_amps, make_timebase, transmission,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
@@ -135,6 +138,66 @@ def plot_waveform_periods_nm(
     plt.tight_layout()
     plt.savefig(out, dpi=180)
     plt.close()
+    return out
+
+
+def plot_lockin_spectrum(
+    result, output_path=PLOTS_DIR / "lockin_spectrum.png",
+    hwhm_hz=DEFAULT_HWHM_HZ,
+    fm_hz=20_000.0, fs_hz=2_000_000.0, peak_abs=0.5,
+    line_profile=None,
+):
+    """Plot waveform, transmission, and 1f/2f demodulated signals over time."""
+    t_s, dt_s, npp = make_timebase(fm_hz, fs_hz)
+    theta = 2.0 * np.pi * fm_hz * np.asarray(t_s, dtype=np.float64)
+    m_theta = _eval_harmonics(theta, result.amplitudes, result.phases_rad)
+    x_hz = hwhm_hz * m_theta
+    trans = np.asarray(transmission(x_hz, peak_abs=peak_abs, line_profile=line_profile))
+
+    # demod products: signal * 2cos(h*theta)  (the "2*" matches lockin_amps normalization)
+    demod_1f = trans * 2.0 * np.cos(theta)
+    demod_2f = trans * 2.0 * np.cos(2.0 * theta)
+
+    # integrated lock-in values for annotation
+    amp_1f = float(np.abs(np.mean(demod_1f - 1j * trans * 2.0 * np.sin(theta))))
+    amp_2f = float(np.abs(np.mean(demod_2f - 1j * trans * 2.0 * np.sin(2.0 * theta))))
+
+    phase = theta / np.pi
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(4, 1, figsize=(9, 9), height_ratios=(1, 1, 1, 1))
+
+    axes[0].plot(phase, m_theta, lw=2.0)
+    axes[0].set_ylabel("x / HWHM")
+    axes[0].set_title("Modulation Waveform")
+    axes[0].set_xlim(0, 2)
+    axes[0].grid(alpha=0.25)
+
+    axes[1].plot(phase, trans, lw=2.0, color="C1")
+    axes[1].set_ylabel("Transmission")
+    axes[1].set_title("Transmission Through Line")
+    axes[1].set_xlim(0, 2)
+    axes[1].grid(alpha=0.25)
+
+    axes[2].plot(phase, demod_1f, lw=1.5, color="C2")
+    axes[2].axhline(0, color="0.5", lw=0.8, ls="--")
+    axes[2].set_ylabel("Demod Signal")
+    axes[2].set_title(f"1f Demodulated  (|c1| = {amp_1f:.4f})")
+    axes[2].set_xlim(0, 2)
+    axes[2].grid(alpha=0.25)
+
+    axes[3].plot(phase, demod_2f, lw=1.5, color="C3")
+    axes[3].axhline(0, color="0.5", lw=0.8, ls="--")
+    axes[3].set_ylabel("Demod Signal")
+    axes[3].set_title(f"2f Demodulated  (|c2| = {amp_2f:.4f})")
+    axes[3].set_xlim(0, 2)
+    axes[3].set_xlabel(r"Phase $\theta / \pi$")
+    axes[3].grid(alpha=0.25)
+
+    plt.tight_layout()
+    plt.savefig(out, dpi=180)
+    plt.close(fig)
     return out
 
 
